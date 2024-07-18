@@ -1,0 +1,532 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: 'Setup of basic infrastructure for the app: VPC, Route53, Network, SecurityGroups, etc.'
+
+Parameters:
+
+  AppNameParameter:
+    Type: String
+    Description: 'AppName'
+    Default: 'TheApp'
+
+  S3BucketNameParameter:
+    Type: String
+    Description: 'Bucket name prefix must be lowercase without special symbols and spaces'
+    Default: 'theappbucket'
+
+  CloudformationKeypairParameter:
+    Type: String
+    Description: 'The name of KeyPair created manually for EC2 instances access over SSH'
+    Default: 'TheAppCloudformationKeypair'
+
+  StaticSiteS3BucketNameParameter:
+    Type: String
+    Description: 'Bucket name to host static site content, must be lowercase without special symbols and spaces'
+    Default: 'stg.theapp.tld'
+
+Mappings:
+
+  FqdnMap:
+    Public:
+      DomainName: 'stg.theapp.tld'
+    Private:
+      DomainName: 'stg.theapp.private'
+
+  FqdnForSslMap:
+    Domain:
+      Name: '*.theapp.tld'
+
+  SubnetConfigMap:
+    VPC:
+      CIDR: '11.0.0.0/16'
+    PublicA:
+      CIDR: '11.0.0.0/24'
+    PublicB:
+      CIDR: '11.0.1.0/24'
+    PrivateA:
+      CIDR: '11.0.10.0/24'
+    PrivateB:
+      CIDR: '11.0.11.0/24'
+
+  IPAllowMap:
+    anyip:
+      Name: 'Any IP'
+      CIDR: '0.0.0.0/0'
+
+  ApiInstanceTypeMap:
+    Ec2:
+      Type: 't2.micro'
+    Rds:
+      Type: 'db.t2.micro'
+    Redis:
+      Type: 'cache.t3.micro'
+
+  DbSnapshotMap:
+    App:
+      ARN: 'arn:aws:rds:xxxx:xxxx:snapshot:xxxx'
+
+Resources:
+
+  # VPC
+  VPC:
+    Type: 'AWS::EC2::VPC'
+    Properties:
+      Tags:
+        - Key: 'Name'
+          Value: !Sub '${AppNameParameter}VPC'
+      CidrBlock: !FindInMap ['SubnetConfigMap', 'VPC', 'CIDR']
+      EnableDnsSupport: true
+      EnableDnsHostnames: true
+      InstanceTenancy: 'default'
+
+  # Hosted Zones
+  PublicHostedZone:
+    Type: 'AWS::Route53::HostedZone'
+    Properties:
+      HostedZoneConfig:
+        Comment: !Sub 'Public Hosted Zone For ${AppNameParameter}'
+      Name: !FindInMap ['FqdnMap', 'Public', 'DomainName']
+      HostedZoneTags:
+        - Key: 'Name'
+          Value: !Sub '${AppNameParameter}PublicHostedZone'
+
+  PrivateHostedZone:
+    Type: 'AWS::Route53::HostedZone'
+    DependsOn:
+      - VPC
+    Properties:
+      HostedZoneConfig:
+        Comment: !Sub 'Private Hosted Zone For ${AppNameParameter}'
+      Name: !FindInMap ['FqdnMap', 'Private', 'DomainName']
+      VPCs:
+        - VPCId: !Ref VPC
+          VPCRegion: !Sub '${AWS::Region}'
+      HostedZoneTags:
+        - Key: 'Name'
+          Value: !Sub '${AppNameParameter}PrivateHostedZone'
+
+  # Two public subnets, where instances can have public IP addresses
+  PublicSubnetA:
+    Type: 'AWS::EC2::Subnet'
+    DependsOn:
+      - VPC
+    Properties:
+      Tags:
+        - Key: 'Name'
+          Value: !Sub 'P{AppNameParameter}PublicSubnetA'
+      VpcId: !Ref VPC
+      CidrBlock: !FindInMap ['SubnetConfigMap', 'PublicA', 'CIDR']
+      AvailabilityZone: !Sub '${AWS::Region}a'
+      MapPublicIpOnLaunch: true
+  PublicSubnetB:
+    Type: 'AWS::EC2::Subnet'
+    DependsOn:
+      - VPC
+    Properties:
+      Tags:
+        - Key: 'Name'
+          Value: !Sub '${AppNameParameter}PublicSubnetB'
+      VpcId: !Ref VPC
+      CidrBlock: !FindInMap ['SubnetConfigMap', 'PublicB', 'CIDR']
+      AvailabilityZone: !Sub '${AWS::Region}b'
+      MapPublicIpOnLaunch: true
+
+  # Two private subnets where instances will only have private IP addresses, and will only be reachable by other members of the VPC
+  PrivateSubnetA:
+    Type: 'AWS::EC2::Subnet'
+    DependsOn:
+      - VPC
+    Properties:
+      Tags:
+        - Key: 'Name'
+          Value: !Sub '${AppNameParameter}PrivateSubnetA'
+      VpcId: !Ref VPC
+      CidrBlock: !FindInMap ['SubnetConfigMap', 'PrivateA', 'CIDR']
+      AvailabilityZone: !Sub '${AWS::Region}a'
+  PrivateSubnetB:
+    Type: 'AWS::EC2::Subnet'
+    DependsOn:
+      - VPC
+    Properties:
+      Tags:
+        - Key: 'Name'
+          Value: !Sub '${AppNameParameter}PrivateSubnetB'
+      VpcId: !Ref VPC
+      CidrBlock: !FindInMap ['SubnetConfigMap', 'PrivateB', 'CIDR']
+      AvailabilityZone: !Sub '${AWS::Region}b'
+
+  # Setup networking resources for the public subnets. Instances in the public subnets have public IP addresses and the routing table sends network traffic via the internet gateway.
+  InternetGateway:
+    Type: 'AWS::EC2::InternetGateway'
+    DependsOn:
+      - VPC
+    Properties:
+      Tags:
+        - Key: 'Name'
+          Value: !Sub '${AppNameParameter}InternetGateway'
+  VPCGatewayAttachment:
+    Type: 'AWS::EC2::VPCGatewayAttachment'
+    DependsOn:
+      - VPC
+      - InternetGateway
+    Properties:
+      InternetGatewayId: !Ref InternetGateway
+      VpcId: !Ref VPC
+  PublicRouteTable:
+    Type: 'AWS::EC2::RouteTable'
+    DependsOn:
+      - VPC
+    Properties:
+      Tags:
+        - Key: 'Name'
+          Value: !Sub '${AppNameParameter}PublicRouteTable'
+      VpcId: !Ref VPC
+  PublicRoute:
+    Type: 'AWS::EC2::Route'
+    DependsOn:
+      - InternetGateway
+      - VPCGatewayAttachment
+      - PublicRouteTable
+    Properties:
+      DestinationCidrBlock: '0.0.0.0/0'
+      RouteTableId: !Ref PublicRouteTable
+      GatewayId: !Ref InternetGateway
+  PublicSubnetRouteTableAssociationA:
+    Type: 'AWS::EC2::SubnetRouteTableAssociation'
+    DependsOn:
+      - PublicSubnetA
+      - PublicRouteTable
+    Properties:
+      RouteTableId: !Ref PublicRouteTable
+      SubnetId: !Ref PublicSubnetA
+  PublicSubnetRouteTableAssociationB:
+    Type: 'AWS::EC2::SubnetRouteTableAssociation'
+    DependsOn:
+      - PublicSubnetB
+      - PublicRouteTable
+    Properties:
+      RouteTableId: !Ref PublicRouteTable
+      SubnetId: !Ref PublicSubnetB
+
+  # Setup networking resources for the private subnets. Instances in these subnets have only private IP addresses, and must use a NAT gateway to talk to the internet. Each private subnet has one NAT gateways
+
+  # Private subnet A
+  NatGatewayEIPA:
+    Type: 'AWS::EC2::EIP'
+    DependsOn:
+      - VPCGatewayAttachment
+    Properties:
+      Domain: vpc
+  NatGatewayA:
+    Type: 'AWS::EC2::NatGateway'
+    DependsOn:
+      - PublicSubnetA
+      - NatGatewayEIPA
+    Properties:
+      AllocationId: !GetAtt NatGatewayEIPA.AllocationId
+      SubnetId: !Ref PublicSubnetA
+  PrivateRouteTableA:
+    Type: 'AWS::EC2::RouteTable'
+    DependsOn:
+      - VPC
+    Properties:
+      VpcId: !Ref VPC
+  PrivateRouteA:
+    Type: 'AWS::EC2::Route'
+    DependsOn:
+      - NatGatewayA
+      - PrivateRouteTableA
+    Properties:
+      DestinationCidrBlock: '0.0.0.0/0'
+      RouteTableId: !Ref PrivateRouteTableA
+      NatGatewayId: !Ref NatGatewayA
+  PrivateRouteTableAssociationA:
+    Type: 'AWS::EC2::SubnetRouteTableAssociation'
+    DependsOn:
+      - PrivateSubnetA
+      - PrivateRouteTableA
+    Properties:
+      RouteTableId: !Ref PrivateRouteTableA
+      SubnetId: !Ref PrivateSubnetA
+
+  # Private subnet B
+  NatGatewayEIPB:
+    Type: 'AWS::EC2::EIP'
+    DependsOn:
+      - VPCGatewayAttachment
+    Properties:
+      Domain: vpc
+  NatGatewayB:
+    Type: 'AWS::EC2::NatGateway'
+    DependsOn:
+      - PublicSubnetB
+      - NatGatewayEIPB
+    Properties:
+      AllocationId: !GetAtt NatGatewayEIPB.AllocationId
+      SubnetId: !Ref PublicSubnetB
+  PrivateRouteTableB:
+    Type: 'AWS::EC2::RouteTable'
+    DependsOn:
+      - VPC
+    Properties:
+      VpcId: !Ref VPC
+  PrivateRouteB:
+    Type: 'AWS::EC2::Route'
+    DependsOn:
+      - NatGatewayB
+      - PrivateRouteTableB
+    Properties:
+      DestinationCidrBlock: '0.0.0.0/0'
+      RouteTableId: !Ref PrivateRouteTableB
+      NatGatewayId: !Ref NatGatewayB
+  PrivateRouteTableAssociationB:
+    Type: 'AWS::EC2::SubnetRouteTableAssociation'
+    DependsOn:
+      - PrivateSubnetB
+      - PrivateRouteTableB
+    Properties:
+      RouteTableId: !Ref PrivateRouteTableB
+      SubnetId: !Ref PrivateSubnetB
+
+  # Default network and security settings for private network instances
+  DefaultSecurityGroup:
+    Type: 'AWS::EC2::SecurityGroup'
+    DependsOn:
+      - VPC
+    Properties:
+      Tags:
+        - Key: 'Name'
+          Value: !Sub '${AppNameParameter}DefaultSecurityGroup'
+      GroupName: !Sub '${AppNameParameter}DefaultSecurityGroup'
+      GroupDescription: !Sub '${AppNameParameter}DefaultSecurityGroup'
+      VpcId: !Ref VPC
+      SecurityGroupIngress:
+        - Description: 'VPC'
+          CidrIp: !FindInMap ['SubnetConfigMap', 'VPC', 'CIDR']
+          IpProtocol: 'tcp'
+          FromPort: 22
+          ToPort: 22
+        - Description: 'subnetPublicA'
+          CidrIp: !FindInMap ['SubnetConfigMap', 'PublicA', 'CIDR']
+          IpProtocol: 'tcp'
+          FromPort: 22
+          ToPort: 22
+        - Description: 'subnetPublicB'
+          CidrIp: !FindInMap ['SubnetConfigMap', 'PublicB', 'CIDR']
+          IpProtocol: 'tcp'
+          FromPort: 22
+          ToPort: 22
+        - Description: 'subnetPrivateA'
+          CidrIp: !FindInMap ['SubnetConfigMap', 'PrivateA', 'CIDR']
+          IpProtocol: 'tcp'
+          FromPort: 22
+          ToPort: 22
+        - Description: 'subnetPrivateB'
+          CidrIp: !FindInMap ['SubnetConfigMap', 'PrivateB', 'CIDR']
+          IpProtocol: 'tcp'
+          FromPort: 22
+          ToPort: 22
+        - Description: 'VPC'
+          CidrIp: !FindInMap ['SubnetConfigMap', 'VPC', 'CIDR']
+          IpProtocol: 'tcp'
+          FromPort: 80
+          ToPort: 80
+        - Description: 'subnetPublicA'
+          CidrIp: !FindInMap ['SubnetConfigMap', 'PublicA', 'CIDR']
+          IpProtocol: 'tcp'
+          FromPort: 80
+          ToPort: 80
+        - Description: 'subnetPublicB'
+          CidrIp: !FindInMap ['SubnetConfigMap', 'PublicB', 'CIDR']
+          IpProtocol: 'tcp'
+          FromPort: 80
+          ToPort: 80
+        - Description: 'subnetPrivateA'
+          CidrIp: !FindInMap ['SubnetConfigMap', 'PrivateA', 'CIDR']
+          IpProtocol: 'tcp'
+          FromPort: 80
+          ToPort: 80
+        - Description: 'subnetPrivateB'
+          CidrIp: !FindInMap ['SubnetConfigMap', 'PrivateB', 'CIDR']
+          IpProtocol: 'tcp'
+          FromPort: 80
+          ToPort: 80
+        - Description: 'VPC'
+          CidrIp: !FindInMap ['SubnetConfigMap', 'VPC', 'CIDR']
+          IpProtocol: 'tcp'
+          FromPort: 8080
+          ToPort: 8080
+        - Description: 'subnetPublicA'
+          CidrIp: !FindInMap ['SubnetConfigMap', 'PublicA', 'CIDR']
+          IpProtocol: 'tcp'
+          FromPort: 8080
+          ToPort: 8080
+        - Description: 'subnetPublicB'
+          CidrIp: !FindInMap ['SubnetConfigMap', 'PublicB', 'CIDR']
+          IpProtocol: 'tcp'
+          FromPort: 8080
+          ToPort: 8080
+        - Description: 'subnetPrivateA'
+          CidrIp: !FindInMap ['SubnetConfigMap', 'PrivateA', 'CIDR']
+          IpProtocol: 'tcp'
+          FromPort: 8080
+          ToPort: 8080
+        - Description: 'subnetPrivateB'
+          CidrIp: !FindInMap ['SubnetConfigMap', 'PrivateB', 'CIDR']
+          IpProtocol: 'tcp'
+          FromPort: 8080
+          ToPort: 8080
+        - Description: 'VPC'
+          CidrIp: !FindInMap ['SubnetConfigMap', 'VPC', 'CIDR']
+          IpProtocol: 'tcp'
+          FromPort: 6379
+          ToPort: 6379
+        - Description: 'subnetPublicA'
+          CidrIp: !FindInMap ['SubnetConfigMap', 'PublicA', 'CIDR']
+          IpProtocol: 'tcp'
+          FromPort: 6379
+          ToPort: 6379
+        - Description: 'subnetPublicB'
+          CidrIp: !FindInMap ['SubnetConfigMap', 'PublicB', 'CIDR']
+          IpProtocol: 'tcp'
+          FromPort: 6379
+          ToPort: 6379
+        - Description: 'subnetPrivateA'
+          CidrIp: !FindInMap ['SubnetConfigMap', 'PrivateA', 'CIDR']
+          IpProtocol: 'tcp'
+          FromPort: 6379
+          ToPort: 6379
+        - Description: 'subnetPrivateB'
+          CidrIp: !FindInMap ['SubnetConfigMap', 'PrivateB', 'CIDR']
+          IpProtocol: 'tcp'
+          FromPort: 6379
+          ToPort: 6379
+        # Open web-socket port 3001 for all IPs
+        - Description: !FindInMap ['IPAllowMap', 'anyip', 'Name']
+          CidrIp: !FindInMap ['IPAllowMap', 'anyip', 'CIDR']
+          IpProtocol: 'tcp'
+          FromPort: 3001
+          ToPort: 3001
+        # TODO: Allow ssh connection only from your IP to avoid connections from any IP
+        - Description: !FindInMap ['IPAllowMap', 'anyip', 'Name']
+          CidrIp: !FindInMap ['IPAllowMap', 'anyip', 'CIDR']
+          IpProtocol: 'tcp'
+          FromPort: 22
+          ToPort: 22
+
+  # redis nested stack
+  RedisStack:
+    Type: 'AWS::CloudFormation::Stack'
+    DependsOn:
+      - VPC
+      - PrivateHostedZone
+      - PrivateSubnetA
+      - PrivateSubnetB
+      - DefaultSecurityGroup
+    Properties:
+      Tags:
+        - Key: 'Name'
+          Value: !Sub '${AppNameParameter}RedisStack'
+      TemplateURL: !Sub 'https://${S3BucketNameParameter}.s3.amazonaws.com/cloudformation/redis.yaml'
+      Parameters:
+        AppNameParameter: !Ref AppNameParameter
+        VpcParameter: !Ref VPC
+        SubnetPrivateAIdParameter: !Ref PrivateSubnetA
+        SubnetPrivateBIdParameter: !Ref PrivateSubnetB
+        HostedZoneIdPrivateParameter: !Ref PrivateHostedZone
+        RdsInstanceTypeParameter: !FindInMap ['ApiInstanceTypeMap', 'Redis', 'Type']
+        PrivateFqdnParameter: !FindInMap ['FqdnMap', 'Private', 'DomainName']
+        DefaultSecurityGroupParameter: !Ref DefaultSecurityGroup
+
+  # db nested stack
+  DbStack:
+    Type: 'AWS::CloudFormation::Stack'
+    DependsOn:
+      - VPC
+      - PrivateHostedZone
+      - PrivateSubnetA
+      - PrivateSubnetB
+      - DefaultSecurityGroup
+    Properties:
+      Tags:
+        - Key: 'Name'
+          Value: !Sub '${AppNameParameter}DbStack'
+      TemplateURL: !Sub 'https://${S3BucketNameParameter}.s3.amazonaws.com/cloudformation/db.yaml'
+      Parameters:
+        AppNameParameter: !Ref AppNameParameter
+        VpcParameter: !Ref VPC
+        SubnetPrivateAIdParameter: !Ref PrivateSubnetA
+        SubnetPrivateBIdParameter: !Ref PrivateSubnetB
+        HostedZoneIdPrivateParameter: !Ref PrivateHostedZone
+        RdsInstanceTypeParameter: !FindInMap ['ApiInstanceTypeMap', 'Rds', 'Type']
+        PrivateFqdnParameter: !FindInMap ['FqdnMap', 'Private', 'DomainName']
+        DBSnapshotARNParameter: !FindInMap [DbSnapshotMap, 'App', 'ARN']
+        DefaultSecurityGroupParameter: !Ref DefaultSecurityGroup
+
+  ApiSslCertificate:
+    Type: 'AWS::CertificateManager::Certificate'
+    Properties:
+      Tags:
+        - Key: 'Name'
+          Value: !Sub '${AppNameParameter}ApiSslCertificate'
+      DomainName: !FindInMap ['FqdnMap', 'Public', 'DomainName']
+      SubjectAlternativeNames:
+        - !FindInMap ['FqdnForSslMap', 'Domain', 'Name']
+      DomainValidationOptions:
+        -  DomainName: !FindInMap ['FqdnMap', 'Public', 'DomainName']
+           ValidationDomain: !FindInMap ['FqdnMap', 'Public', 'DomainName']
+      ValidationMethod: 'DNS'
+
+  # api nested stack
+  ApiStack:
+    Type: 'AWS::CloudFormation::Stack'
+    DependsOn:
+      - VPC
+      - PrivateHostedZone
+      - PrivateSubnetA
+      - PrivateSubnetB
+      - DefaultSecurityGroup
+      - VPCGatewayAttachment
+      - PrivateHostedZone
+      - PublicHostedZone
+      - ApiSslCertificate
+    Properties:
+      Tags:
+        - Key: 'Name'
+          Value: !Sub '${AppNameParameter}ApiStack'
+      TemplateURL: !Sub 'https://${S3BucketNameParameter}.s3.amazonaws.com/cloudformation/api.yaml'
+      Parameters:
+        AppNameParameter: !Ref AppNameParameter
+        VpcParameter: !Ref VPC
+        SubnetPrivateAIdParameter: !Ref PrivateSubnetA
+        SubnetPrivateBIdParameter: !Ref PrivateSubnetB
+        SubnetPublicAIdParameter: !Ref PublicSubnetA
+        SubnetPublicBIdParameter: !Ref PublicSubnetB
+        HostedZoneIdPrivateParameter: !Ref PrivateHostedZone
+        HostedZoneIdPublicParameter: !Ref PublicHostedZone
+        Ec2InstanceTypeParameter: !FindInMap ['ApiInstanceTypeMap', 'Ec2', 'Type']
+        PrivateFqdnParameter: !FindInMap ['FqdnMap', 'Private', 'DomainName']
+        PublicFqdnParameter: !FindInMap ['FqdnMap', 'Public', 'DomainName']
+        DefaultSecurityGroupParameter: !Ref DefaultSecurityGroup
+        CloudformationKeypairParameter: !Ref CloudformationKeypairParameter
+        AllowIpCirdParameter: !FindInMap ['IPAllowMap', 'anyip', 'CIDR']
+        AllowIpNameParameter: !FindInMap ['IPAllowMap', 'anyip', 'Name']
+        ApiSslCertificateParameter: !Ref ApiSslCertificate
+
+  # ui nested stack
+  UiStack:
+    Type: 'AWS::CloudFormation::Stack'
+    DependsOn:
+      - VPC
+      - PublicHostedZone
+      - ApiSslCertificate
+    Properties:
+      Tags:
+        - Key: 'Name'
+          Value: !Sub '${AppNameParameter}UiStack'
+      TemplateURL: !Sub 'https://${S3BucketNameParameter}.s3.amazonaws.com/cloudformation/ui.yaml'
+      Parameters:
+        AppNameParameter: !Ref AppNameParameter
+        HostedZoneIdPublicParameter: !Ref PublicHostedZone
+        PublicFqdnParameter: !FindInMap ['FqdnMap', 'Public', 'DomainName']
+        StaticSiteS3BucketNameParameter: !Ref StaticSiteS3BucketNameParameter
+        ApiSslCertificateParameter: 'arn:aws:acm:us-east-1:779654095714:certificate/b923eebb-3a10-48e8-8576-10f4a64b21cd'

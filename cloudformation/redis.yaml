@@ -1,0 +1,67 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: 'Setup of Redis infrastructure for the app'
+
+Parameters:
+
+  AppNameParameter:
+    Type: String
+  VpcParameter:
+    Type: String
+  SubnetPrivateAIdParameter:
+    Type: String
+  SubnetPrivateBIdParameter:
+    Type: String
+  HostedZoneIdPrivateParameter:
+    Type: String
+  RdsInstanceTypeParameter:
+    Type: String
+  PrivateFqdnParameter:
+    Type: String
+  DefaultSecurityGroupParameter:
+    Type: String
+
+Resources:
+
+  RedisCacheSubnetGroup:
+    Type: 'AWS::ElastiCache::SubnetGroup'
+    Properties:
+      CacheSubnetGroupName: 'RedisSubnet'
+      Description: 'RedisSubnet'
+      SubnetIds:
+        - !Ref SubnetPrivateAIdParameter
+
+  RedisElastiCache:
+    Type: 'AWS::ElastiCache::CacheCluster'
+    DependsOn:
+      - RedisCacheSubnetGroup
+    Properties:
+      Tags:
+        - Key: 'Name'
+          Value: !Sub '${AppNameParameter}RedisElastiCache'
+      ClusterName: !Sub '${AppNameParameter}Redis-1'
+      CacheNodeType: !Ref RdsInstanceTypeParameter
+      Engine: 'redis'
+      EngineVersion: '5.0.6'
+      NumCacheNodes: 1
+      Port: 6379
+      VpcSecurityGroupIds:
+        - !Ref DefaultSecurityGroupParameter
+      AZMode: 'single-az'
+      CacheSubnetGroupName: !Ref RedisCacheSubnetGroup
+      PreferredAvailabilityZone: !Sub '${AWS::Region}a'
+      SnapshotRetentionLimit: 10
+      SnapshotWindow: '03:00-05:00'
+      PreferredMaintenanceWindow: 'Mon:05:00-Mon:06:00'
+
+  # Route 53 to Redis
+  RedisDbDnsRecord:
+    Type: 'AWS::Route53::RecordSet'
+    DependsOn:
+      - RedisElastiCache
+    Properties:
+      HostedZoneId: !Ref HostedZoneIdPrivateParameter
+      Name: !Sub 'redis.${PrivateFqdnParameter}'
+      ResourceRecords:
+        - !GetAtt RedisElastiCache.RedisEndpoint.Address
+      Type: CNAME
+      TTL: '300'

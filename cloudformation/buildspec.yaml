@@ -1,0 +1,30 @@
+version: 0.2
+
+env:
+  variables:
+    S3_BUCKET_NAME: "theappbucket"
+    ARTIFACT_ROOT_STACK_FILE_NAME: "cloudformation/root.yaml"
+    ARTIFACT_REDIS_STACK_FILE_NAME: "cloudformation/redis.yaml"
+    ARTIFACT_DB_STACK_FILE_NAME: "cloudformation/db.yaml"
+    ARTIFACT_API_STACK_FILE_NAME: "cloudformation/api.yaml"
+    ARTIFACT_UI_STACK_FILE_NAME: "cloudformation/ui.yaml"
+
+phases:
+  install:
+    runtime-versions:
+      python: 3.8
+  build:
+    commands:
+      - aws s3 cp ${ARTIFACT_ROOT_STACK_FILE_NAME} s3://${S3_BUCKET_NAME}/${ARTIFACT_ROOT_STACK_FILE_NAME}
+      - aws s3 cp ${ARTIFACT_REDIS_STACK_FILE_NAME} s3://${S3_BUCKET_NAME}/${ARTIFACT_REDIS_STACK_FILE_NAME}
+      - aws s3 cp ${ARTIFACT_DB_STACK_FILE_NAME} s3://${S3_BUCKET_NAME}/${ARTIFACT_DB_STACK_FILE_NAME}
+      - aws s3 cp ${ARTIFACT_API_STACK_FILE_NAME} s3://${S3_BUCKET_NAME}/${ARTIFACT_API_STACK_FILE_NAME}
+      - aws s3 cp ${ARTIFACT_UI_STACK_FILE_NAME} s3://${S3_BUCKET_NAME}/${ARTIFACT_UI_STACK_FILE_NAME}
+
+artifacts:
+  files:
+    - ${ARTIFACT_ROOT_STACK_FILE_NAME}
+    - ${ARTIFACT_REDIS_STACK_FILE_NAME}
+    - ${ARTIFACT_DB_STACK_FILE_NAME}
+    - ${ARTIFACT_API_STACK_FILE_NAME}
+    - ${ARTIFACT_UI_STACK_FILE_NAME}

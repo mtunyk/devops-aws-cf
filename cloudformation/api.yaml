@@ -1,0 +1,415 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: 'Setup of API infrastructure for the app'
+
+Parameters:
+
+  AppNameParameter:
+    Type: String
+  VpcParameter:
+    Type: String
+  SubnetPrivateAIdParameter:
+    Type: String
+  SubnetPrivateBIdParameter:
+    Type: String
+  SubnetPublicAIdParameter:
+    Type: String
+  SubnetPublicBIdParameter:
+    Type: String
+  HostedZoneIdPrivateParameter:
+    Type: String
+  HostedZoneIdPublicParameter:
+    Type: String
+  PrivateFqdnParameter:
+    Type: String
+  PublicFqdnParameter:
+    Type: String
+  Ec2InstanceTypeParameter:
+    Type: String
+  DefaultSecurityGroupParameter:
+    Type: String
+  CloudformationKeypairParameter:
+    Type: String
+  AllowIpCirdParameter:
+    Type: String
+  AllowIpNameParameter:
+    Type: String
+  ApiSslCertificateParameter:
+    Type: String
+
+Resources:
+
+  ApiInstanceRole:
+    Type: 'AWS::IAM::Role'
+    Properties:
+      RoleName: !Sub '${AppNameParameter}ApiInstanceRole'
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: 'Allow'
+            Principal:
+              Service:
+                - 'ec2.amazonaws.com'
+            Action:
+              - 'sts:AssumeRole'
+      Policies:
+        - PolicyName: !Sub '${AppNameParameter}ApiInstanceRolePolicy'
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: 'Allow'
+                Action:
+                  - 'ec2:DescribeInstances'
+                  - 'ec2:DescribeAddresses'
+                  - 'ec2:DescribeRouteTables'
+                Resource: '*'
+
+  ApiInstanceProfile:
+    Type: 'AWS::IAM::InstanceProfile'
+    DependsOn:
+      - ApiInstanceRole
+    Properties:
+      InstanceProfileName: !Sub '${AppNameParameter}ApiInstanceProfile'
+      Roles:
+        - Ref: ApiInstanceRole
+
+  ApiInstance:
+    Type: 'AWS::EC2::Instance'
+    DependsOn:
+      - ApiInstanceProfile
+    Metadata:
+      AWS::CloudFormation::Init:
+        configSets:
+          install:
+            - create_init_script
+            - execute_init_script
+            - remove_init_script
+        create_init_script:
+          files:
+            /root/app-init.sh:
+              context:
+                StackName: !Sub '${AWS::StackName}'
+                Region: !Sub '${AWS::Region}'
+              content: |
+                #!/bin/bash -eE
+
+                set -e
+
+                trap "fail" ERR
+
+                LOG_FILE="/var/log/cloud-init-output.log"
+                touch "$LOG_FILE"
+                chmod 644 "$LOG_FILE"
+                enable_logging() {
+                  exec > >(tee -a "$LOG_FILE"|logger -t user-data -s 2>/dev/console) 2>&1
+                }
+
+                log() {
+                  echo "$(date -u) [APP] $@"
+                }
+
+                fail() {
+                  # TODO: process failure case here
+                  log "Sending the error signal to CFN: 1"
+                  /usr/local/bin/cfn-signal -e 1 --stack '{{StackName}}' --resource ApiInstance --region '{{Region}}'
+                  log "Signal sent to CFN"
+                }
+
+                bootstrap() {
+                  # set working directory
+                  cd /root/
+
+                  # install awscli and jq
+                  log "install awscli and jq"
+                  apt-get -y update
+                  apt-get -y install python3-pip
+                  pip3 install awscli --upgrade
+                  apt-get -y install jq
+
+                  # TODO: bootstrap instance here
+                }
+
+                enable_logging
+                log "Started init script"
+
+                bootstrap
+
+                log "Completed init script"
+              mode: "000700"
+              owner: "root"
+              group: "root"
+        execute_init_script:
+          commands:
+            init:
+              command: '/root/app-init.sh'
+              cwd: '/root'
+        remove_init_script:
+          commands:
+            remove:
+              command: 'rm -rf /root/app-init.sh'
+    Properties:
+      Tags:
+        - Key: 'Name'
+          Value: !Sub 'ec2-api.${PublicFqdnParameter}'
+      InstanceType: !Ref Ec2InstanceTypeParameter
+      ImageId: 'ami-05c26ae4789875080'
+      SubnetId: !Ref SubnetPublicAIdParameter
+      SecurityGroupIds:
+        - !Ref DefaultSecurityGroupParameter
+      KeyName: !Ref CloudformationKeypairParameter
+      IamInstanceProfile: !Ref ApiInstanceProfile
+      BlockDeviceMappings:
+        - DeviceName: /dev/sda1
+          Ebs:
+            VolumeType: gp2
+            VolumeSize: 30
+            DeleteOnTermination: true
+      UserData:
+        Fn::Base64: !Sub |
+          Content-Type: multipart/mixed; boundary="==BOUNDARY=="
+          MIME-Version: 1.0
+
+          --==BOUNDARY==
+          MIME-Version: 1.0
+          Content-Type: text/cloud-config; charset="us-ascii"
+          Content-Transfer-Encoding: 7bit
+          Content-Disposition: attachment; filename="cloud-config.txt"
+
+          #cloud-config
+          preserve_hostname: false
+          hostname: ec2-api
+          fqdn: ec2-api.${PublicFqdnParameter}
+          manage_etc_hosts: true
+
+          --==BOUNDARY==
+          MIME-Version: 1.0
+          Content-Type: text/x-shellscript; charset="us-ascii"
+          Content-Transfer-Encoding: 7bit
+          Content-Disposition: attachment; filename="app-userdata.sh"
+
+          #!/bin/bash -eE
+
+          set -e
+
+          trap "fail" ERR
+
+          LOG_FILE="/var/log/cloud-init-output.log"
+          touch "$LOG_FILE"
+          chmod 644 "$LOG_FILE"
+          enable_logging() {
+            exec > >(tee -a "$LOG_FILE"|logger -t user-data -s 2>/dev/console) 2>&1
+          }
+
+          log() {
+            echo "$(date -u) [APP] $@"
+          }
+
+          fail() {
+            log "Sending the error signal to CFN: 1"
+            /usr/local/bin/cfn-signal -e 1 --stack '${AWS::StackName}' --resource ApiInstance --region '${AWS::Region}'
+            log "Signal sent to CFN"
+          }
+
+          install_cfn() {
+            log "Install CFN"
+            apt-get -y update
+            apt-get -y install python2
+            curl https://bootstrap.pypa.io/get-pip.py --output get-pip.py
+            python2 get-pip.py
+            rm -rf get-pip.py
+            pip2 install https://s3.amazonaws.com/cloudformation-examples/aws-cfn-bootstrap-latest.tar.gz
+            log "Completed CFN installation"
+          }
+
+          bootstrap() {
+            log "Starting CFN-Init, waiting to complete..."
+            /usr/local/bin/cfn-init --stack '${AWS::StackName}' --resource ApiInstance --region '${AWS::Region}' --configsets 'install' &&
+            CFN_EXIT_CODE=$?
+            log "completed: cfn-init"
+
+            log "Sending the signal to CFN: $CFN_EXIT_CODE"
+            /usr/local/bin/cfn-signal -e $CFN_EXIT_CODE --stack '${AWS::StackName}' --resource ApiInstance --region '${AWS::Region}'
+            log "Signal sent to CFN"
+          }
+
+          enable_logging
+          log "Started userdata script"
+
+          install_cfn
+          bootstrap
+
+          log "Completed userdata script"
+          --==BOUNDARY==--
+      AvailabilityZone: !Sub '${AWS::Region}a'
+      DisableApiTermination: false
+    CreationPolicy:
+      ResourceSignal:
+        Timeout: 'PT5M'
+
+  ApiInstanceEIP:
+    Type: 'AWS::EC2::EIP'
+    DependsOn:
+      - ApiInstance
+    Properties:
+      Domain: vpc
+  ApiInstanceEIPAssociation:
+    Type: 'AWS::EC2::EIPAssociation'
+    DependsOn:
+      - ApiInstance
+      - ApiInstanceEIP
+    Properties:
+      InstanceId: !Ref ApiInstance
+      AllocationId: !GetAtt ApiInstanceEIP.AllocationId
+
+  ApiPublicDnsRecord:
+    Type: 'AWS::Route53::RecordSet'
+    DependsOn:
+      - ApiInstance
+      - ApiInstanceEIP
+      - ApiInstanceEIPAssociation
+    Properties:
+      HostedZoneId: !Ref HostedZoneIdPublicParameter
+      Name: !Sub 'ec2-api.${PublicFqdnParameter}'
+      ResourceRecords:
+        - !Ref ApiInstanceEIP
+      Type: A
+      TTL: '300'
+  ApiPrivateDnsRecord:
+    Type: 'AWS::Route53::RecordSet'
+    DependsOn:
+      - ApiInstance
+    Properties:
+      HostedZoneId: !Ref HostedZoneIdPrivateParameter
+      Name: !Sub 'ec2-api.${PrivateFqdnParameter}'
+      ResourceRecords:
+        - !GetAtt ApiInstance.PrivateIp
+      Type: A
+      TTL: '300'
+
+  ApiElbSecurityGroup:
+    Type: 'AWS::EC2::SecurityGroup'
+    Properties:
+      Tags:
+        - Key: 'Name'
+          Value: !Sub '${AppNameParameter}ApiElbSecurityGroup'
+      GroupName: !Sub '${AppNameParameter}ApiElbSecurityGroup'
+      GroupDescription: !Sub '${AppNameParameter}ApiElbSecurityGroup'
+      VpcId: !Ref VpcParameter
+      SecurityGroupIngress:
+        - Description: !Ref AllowIpNameParameter
+          CidrIp: !Ref AllowIpCirdParameter
+          IpProtocol: 'tcp'
+          FromPort: 443
+          ToPort: 443
+        - Description: !Ref AllowIpNameParameter
+          CidrIp: !Ref AllowIpCirdParameter
+          IpProtocol: 'tcp'
+          FromPort: 80
+          ToPort: 80
+
+  ApiElb:
+    Type: 'AWS::ElasticLoadBalancingV2::LoadBalancer'
+    DependsOn:
+      - ApiInstance
+      - ApiElbSecurityGroup
+    Properties:
+      Tags:
+        - Key: 'Name'
+          Value: !Sub '${AppNameParameter}ApiElb'
+      Type: 'application'
+      Name: !Sub '${AppNameParameter}AnalyticsElb'
+      IpAddressType: 'ipv4'
+      Scheme: 'internet-facing'
+      SecurityGroups:
+        - !Ref ApiElbSecurityGroup
+      Subnets:
+        - !Ref SubnetPublicAIdParameter
+        - !Ref SubnetPublicBIdParameter
+      LoadBalancerAttributes:
+        - Key: 'deletion_protection.enabled'
+          Value: false
+        - Key: 'idle_timeout.timeout_seconds'
+          Value: 65
+        - Key: 'routing.http2.enabled'
+          Value: true
+        - Key: 'access_logs.s3.enabled'
+          Value: false
+  ApiElbHttpListener:
+    Type: 'AWS::ElasticLoadBalancingV2::Listener'
+    DependsOn:
+      - ApiElb
+    Properties:
+      LoadBalancerArn: !Ref ApiElb
+      Protocol: 'HTTP'
+      Port: 80
+      DefaultActions:
+        - Type: 'redirect'
+          RedirectConfig:
+            Protocol: 'HTTPS'
+            Port: '443'
+            Host: '#{host}'
+            Path: '/#{path}'
+            Query: '#{query}'
+            StatusCode: 'HTTP_301'
+  ApiElbHttpsListener:
+    Type: 'AWS::ElasticLoadBalancingV2::Listener'
+    DependsOn:
+      - ApiElb
+      - ApiElbTargetGroup
+    Properties:
+      LoadBalancerArn: !Ref ApiElb
+      Protocol: 'HTTPS'
+      Port: 443
+      Certificates:
+        - CertificateArn: !Ref ApiSslCertificateParameter
+      SslPolicy: 'ELBSecurityPolicy-TLS-1-2-Ext-2018-06'
+      DefaultActions:
+        - Type: 'forward'
+          TargetGroupArn: !Ref ApiElbTargetGroup
+  ApiElbTargetGroup:
+    Type: 'AWS::ElasticLoadBalancingV2::TargetGroup'
+    DependsOn:
+      - ApiInstance
+    Properties:
+      Tags:
+        - Key: 'Name'
+          Value: !Sub '${AppNameParameter}ApiElbTargetGroup'
+      VpcId: !Ref VpcParameter
+      Name: !Sub '${AppNameParameter}ApiElbTargetGroup-1'
+      Protocol: 'HTTP'
+      Port: 80
+      TargetType: 'instance'
+      TargetGroupAttributes:
+        - Key: 'deregistration_delay.timeout_seconds'
+          Value: 300
+        - Key: 'slow_start.duration_seconds'
+          Value: 0
+        - Key: 'stickiness.enabled'
+          Value: false
+      Targets:
+        - Id: !Ref ApiInstance
+          Port: 80
+      HealthCheckProtocol: 'HTTP'
+      HealthCheckPath: '/'
+      HealthCheckPort: 'traffic-port'
+      HealthyThresholdCount: 2
+      UnhealthyThresholdCount: 2
+      HealthCheckTimeoutSeconds: 4
+      HealthCheckIntervalSeconds: 5
+      Matcher:
+        HttpCode: 200
+
+  # Route 53 to ELB
+  ApiElbDnsRecord:
+    Type: 'AWS::Route53::RecordSet'
+    DependsOn:
+      - ApiElb
+      - ApiElbHttpListener
+      - ApiElbHttpsListener
+      - ApiElbTargetGroup
+    Properties:
+      HostedZoneId: !Ref HostedZoneIdPublicParameter
+      Name: !Sub 'api.${PublicFqdnParameter}'
+      ResourceRecords:
+        - !GetAtt ApiElb.DNSName
+      Type: CNAME
+      TTL: '300'

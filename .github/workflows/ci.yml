@@ -1,0 +1,28 @@
+name: CI
+
+on:
+  push:
+    branches:
+      - master
+    paths:
+      - 'cloudformation/**'
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+    - uses: actions/checkout@v4
+    - name: Push to AWS CodeCommit Repo
+      run: |
+        mkdir ~/.ssh
+        echo -e "${{ secrets.AWS_SSH_PRIVATE_KEY }}" > ~/.ssh/codecommit
+        chmod 400 ~/.ssh/codecommit
+        echo -e "Host git-codecommit.*.amazonaws.com" > ~/.ssh/config
+        echo -e "User ${{ secrets.AWS_SSH_USER }}" >> ~/.ssh/config
+        echo -e "IdentityFile ~/.ssh/codecommit" >> ~/.ssh/config
+        set +e
+        ssh -o StrictHostKeyChecking=no git-codecommit.eu-central-1.amazonaws.com
+        set -e
+        git remote add codecommit ssh://git-codecommit.eu-central-1.amazonaws.com/v1/repos/TheApp
+        git push codecommit HEAD:refs/heads/master -f

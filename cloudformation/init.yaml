@@ -1,0 +1,310 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: 'Initial Setup of CodeCommit, CodeBuild, CodeDeploy and CodePipeline'
+
+Parameters:
+
+  AppNameParameter:
+    Type: String
+    Description: 'AppName'
+    Default: 'TheApp'
+
+  S3BucketNameParameter:
+    Type: String
+    Description: 'Bucket name must be lowercase without special symbols and spaces'
+    Default: 'theappbucket'
+
+Resources:
+
+  CodeCommitRepo:
+    Type: 'AWS::CodeCommit::Repository'
+    Properties:
+      RepositoryName: !Sub '${AppNameParameter}'
+      RepositoryDescription: !Sub '${AppNameParameter} Repository'
+      Tags:
+        - Key: 'Name'
+          Value: !Sub '${AppNameParameter}Repo'
+
+  CodeCommitGroup:
+    Type: 'AWS::IAM::Group'
+    Properties:
+      GroupName: !Sub '${AppNameParameter}CodeCommit'
+      ManagedPolicyArns:
+        - 'arn:aws:iam::aws:policy/AWSCodeCommitPowerUser'
+
+  CodeCommitUser:
+    Type: 'AWS::IAM::User'
+    DependsOn:
+      - CodeCommitGroup
+    Properties:
+      Groups:
+        - !Ref CodeCommitGroup
+      UserName: !Sub '${AppNameParameter}CodeCommit'
+      Tags:
+        - Key: 'Name'
+          Value: !Sub '${AppNameParameter}CodeCommitUser'
+
+  CodeCommitUserAccessKey:
+    Type: 'AWS::IAM::AccessKey'
+    DependsOn:
+    - CodeCommitUser
+    Properties:
+      UserName: !Ref CodeCommitUser
+
+  AppBucket:
+    Type: 'AWS::S3::Bucket'
+    Properties:
+      BucketName: !Sub '${S3BucketNameParameter}'
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      Tags:
+        - Key: 'Name'
+          Value: !Sub '${AppNameParameter}Bucket'
+
+  CodeBuildRole:
+    Type: 'AWS::IAM::Role'
+    Properties:
+      RoleName: !Sub '${AppNameParameter}CodeBuildRole'
+      Description: 'Service Role for CodeBuild'
+      Tags:
+        - Key: 'Name'
+          Value: !Sub '${AppNameParameter}CodeBuildRole'
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: 'Allow'
+            Principal:
+              Service:
+                - 'codebuild.amazonaws.com'
+            Action:
+              - 'sts:AssumeRole'
+      Policies:
+        - PolicyName: !Sub '${AppNameParameter}CodeBuildRolePolicy'
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: 'Allow'
+                Action:
+                  - 'logs:CreateLogGroup'
+                  - 'logs:CreateLogStream'
+                  - 'logs:PutLogEvents'
+                Resource:
+                  - !Sub 'arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/codebuild/${AppNameParameter}'
+                  - !Sub 'arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/codebuild/${AppNameParameter}:*'
+              - Effect: 'Allow'
+                Action:
+                  - 's3:PutObject'
+                  - 's3:GetObject'
+                  - 's3:GetObjectVersion'
+                  - 's3:GetBucketAcl'
+                  - 's3:GetBucketLocation'
+                Resource:
+                  - !Sub 'arn:aws:s3:::codepipeline-${AWS::Region}-*'
+              - Effect: 'Allow'
+                Action:
+                  - 'codecommit:GitPull'
+                Resource:
+                  - !Sub 'arn:aws:codecommit:${AWS::Region}:${AWS::AccountId}:${AppNameParameter}'
+              - Effect: 'Allow'
+                Action:
+                  - 's3:PutObject'
+                  - 's3:GetObject'
+                  - 's3:GetObjectVersion'
+                  - 's3:GetBucketAcl'
+                  - 's3:GetBucketLocation'
+                Resource:
+                  - !Sub 'arn:aws:s3:::${S3BucketNameParameter}'
+                  - !Sub 'arn:aws:s3:::${S3BucketNameParameter}/*'
+              - Effect: 'Allow'
+                Action:
+                  - 'codebuild:CreateReportGroup'
+                  - 'codebuild:CreateReport'
+                  - 'codebuild:UpdateReport'
+                  - 'codebuild:BatchPutTestCases'
+                Resource:
+                  - !Sub 'arn:aws:codebuild:${AWS::Region}:${AWS::AccountId}:report-group/${AppNameParameter}*'
+      MaxSessionDuration: 3600
+
+  CodeBuildProject:
+    Type: 'AWS::CodeBuild::Project'
+    DependsOn:
+      - CodeBuildRole
+      - AppBucket
+    Properties:
+      Name: !Sub '${AppNameParameter}'
+      Description: !Sub 'This will copy cloudformation/*.yaml files to the S3 bucket with name ${S3BucketNameParameter} under folder cloudformation'
+      Tags:
+        - Key: 'Name'
+          Value: !Sub '${AppNameParameter}CodeBuild'
+      Source:
+        Type: 'CODECOMMIT'
+        BuildSpec: 'cloudformation/buildspec.yaml'
+        Location: !Sub 'https://git-codecommit.${AWS::Region}.amazonaws.com/v1/repos/${AppNameParameter}'
+      Environment:
+        Type: 'LINUX_CONTAINER'
+        ComputeType: 'BUILD_GENERAL1_SMALL'
+        Image: 'aws/codebuild/amazonlinux2-x86_64-standard:3.0'
+        ImagePullCredentialsType: 'CODEBUILD'
+        EnvironmentVariables:
+          - Type: 'PLAINTEXT'
+            Name: 'S3_BUCKET_NAME'
+            Value: !Sub '${S3BucketNameParameter}'
+      Artifacts:
+        Type: 'S3'
+        Location: !Sub '${S3BucketNameParameter}'
+        Path: 'cloudformation'
+        NamespaceType: 'BUILD_ID'
+        Name: 'artifacts'
+      ServiceRole: !GetAtt CodeBuildRole.Arn
+      LogsConfig:
+        CloudWatchLogs:
+          Status: 'ENABLED'
+        S3Logs:
+          Status: 'DISABLED'
+
+  CloudFormationRole:
+    Type: 'AWS::IAM::Role'
+    Properties:
+      RoleName: !Sub '${AppNameParameter}CloudFormationRole'
+      Description: 'Service Role for CloudFormation'
+      Tags:
+        - Key: 'Name'
+          Value: !Sub '${AppNameParameter}CloudFormationRole'
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: 'Allow'
+            Principal:
+              Service:
+                - 'cloudformation.amazonaws.com'
+            Action:
+              - 'sts:AssumeRole'
+      Policies:
+        - PolicyName: !Sub '${AppNameParameter}CloudFormationRolePolicy'
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: 'Allow'
+                Action:
+                  - '*'
+                  - 'iam:*'
+                  - 'route53:*'
+                  - 'ec2:*'
+                Resource: '*'
+      MaxSessionDuration: 3600
+
+  CodePipelineRole:
+    Type: 'AWS::IAM::Role'
+    Properties:
+      RoleName: !Sub '${AppNameParameter}CodePipelineRole'
+      Description: 'Service Role for CodePipeline'
+      Tags:
+        - Key: 'Name'
+          Value: !Sub '${AppNameParameter}CodePipelineRole'
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: 'Allow'
+            Principal:
+              Service:
+                - 'codepipeline.amazonaws.com'
+            Action:
+              - 'sts:AssumeRole'
+      Policies:
+        - PolicyName: !Sub '${AppNameParameter}CodePipelineRolePolicy'
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: 'Allow'
+                Action:
+                  - '*'
+                  - 'iam:*'
+                  - 'route53:*'
+                  - 'ec2:*'
+                Resource: '*'
+      MaxSessionDuration: 3600
+
+  CodePipeline:
+    Type: 'AWS::CodePipeline::Pipeline'
+    DependsOn:
+      - CodePipelineRole
+      - CloudFormationRole
+      - AppBucket
+    Properties:
+      Name: !Sub '${AppNameParameter}'
+      Tags:
+        - Key: 'Name'
+          Value: !Sub '${AppNameParameter}CodePipeline'
+      RoleArn: !GetAtt CodePipelineRole.Arn
+      ArtifactStore:
+        Type: 'S3'
+        Location: !Sub '${S3BucketNameParameter}'
+      Stages:
+        - Name: 'Source'
+          Actions:
+            - Name: 'Source'
+              ActionTypeId:
+                Category: 'Source'
+                Owner: 'AWS'
+                Provider: 'CodeCommit'
+                Version: '1'
+              Configuration:
+                RepositoryName: !Sub '${AppNameParameter}'
+                BranchName: 'master'
+              OutputArtifacts:
+                - Name: 'SourceArtifact'
+        - Name: 'Build'
+          Actions:
+            - Name: 'Build'
+              ActionTypeId:
+                Category: 'Build'
+                Owner: 'AWS'
+                Provider: 'CodeBuild'
+                Version: '1'
+              Configuration:
+                ProjectName: !Sub '${AppNameParameter}'
+              InputArtifacts:
+                - Name: 'SourceArtifact'
+              OutputArtifacts:
+                - Name: 'BuildArtifact'
+        - Name: 'Deploy'
+          Actions:
+            - Name: 'Deploy'
+              RunOrder: 1
+              ActionTypeId:
+                Category: 'Deploy'
+                Owner: 'AWS'
+                Provider: 'CloudFormation'
+                Version: '1'
+              Configuration:
+                ActionMode: 'CHANGE_SET_REPLACE'
+                StackName: !Sub '${AppNameParameter}RootStack'
+                ChangeSetName: !Sub '${AppNameParameter}RootStackChangeSet'
+                TemplatePath: 'BuildArtifact::cloudformation/root.yaml'
+                Capabilities: 'CAPABILITY_IAM,CAPABILITY_NAMED_IAM,CAPABILITY_AUTO_EXPAND'
+                RoleArn: !GetAtt CloudFormationRole.Arn
+                ParameterOverrides: '{"AppNameParameter": "TheApp", "S3BucketNameParameter": "theappbucket"}'
+              InputArtifacts:
+                - Name: 'BuildArtifact'
+            - Name: 'Approve'
+              RunOrder: 2
+              ActionTypeId:
+                Category: 'Approval'
+                Owner: 'AWS'
+                Provider: 'Manual'
+                Version: '1'
+            - Name: 'Apply'
+              RunOrder: 3
+              ActionTypeId:
+                Category: 'Deploy'
+                Owner: 'AWS'
+                Provider: 'CloudFormation'
+                Version: '1'
+              Configuration:
+                ActionMode: 'CHANGE_SET_EXECUTE'
+                StackName: !Sub '${AppNameParameter}RootStack'
+                ChangeSetName: !Sub '${AppNameParameter}RootStackChangeSet'
+              InputArtifacts:
+                - Name: 'BuildArtifact'

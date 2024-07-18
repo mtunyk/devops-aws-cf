@@ -1,0 +1,129 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: 'Setup of API infrastructure for the app'
+
+Parameters:
+
+  AppNameParameter:
+    Type: String
+  HostedZoneIdPublicParameter:
+    Type: String
+  PublicFqdnParameter:
+    Type: String
+  StaticSiteS3BucketNameParameter:
+    Type: String
+  ApiSslCertificateParameter:
+    Type: String
+
+Resources:
+
+  AppUiBucket:
+    Type: 'AWS::S3::Bucket'
+    Properties:
+      BucketName: !Sub '${StaticSiteS3BucketNameParameter}'
+      Tags:
+        - Key: 'Name'
+          Value: !Sub '${AppNameParameter}UiBucket'
+      AccessControl: PublicRead
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: false
+        BlockPublicPolicy: false
+        IgnorePublicAcls: false
+        RestrictPublicBuckets: false
+      WebsiteConfiguration:
+        IndexDocument: index.html
+        ErrorDocument: error.html
+
+  AppUiBucketPolicy:
+    Type: 'AWS::S3::BucketPolicy'
+    DependsOn:
+      - AppUiBucket
+    Properties:
+      PolicyDocument:
+        Id: 'TheAppUiBucketPolicy'
+        Version: '2012-10-17'
+        Statement:
+          - Sid: PublicReadForGetBucketObjects
+            Effect: Allow
+            Principal: '*'
+            Action: 's3:GetObject'
+            Resource: !Sub 'arn:aws:s3:::${StaticSiteS3BucketNameParameter}/*'
+      Bucket: !Ref AppUiBucket
+
+  AppUiCloudFrontOriginAccessIdentity:
+    Type: 'AWS::CloudFront::CloudFrontOriginAccessIdentity'
+    Properties:
+      CloudFrontOriginAccessIdentityConfig:
+        Comment: 'AppUiCloudFrontOriginAccessIdentity'
+
+  AppUiCloudFrontDistribution:
+    Type: 'AWS::CloudFront::Distribution'
+    DependsOn:
+      - AppUiCloudFrontOriginAccessIdentity
+    Properties:
+      Tags:
+        - Key: 'Name'
+          Value: !Sub '${AppNameParameter}UiCloudFrontDistribution'
+      DistributionConfig:
+        Origins:
+        - DomainName: !Sub '${StaticSiteS3BucketNameParameter}.s3.amazonaws.com'
+          Id: theappS3Origin
+          S3OriginConfig:
+            OriginAccessIdentity: !Sub 'origin-access-identity/cloudfront/${AppUiCloudFrontOriginAccessIdentity}'
+        Aliases:
+          - !Sub '${PublicFqdnParameter}'
+          - !Sub 'www.${PublicFqdnParameter}'
+        HttpVersion: 'http2'
+        DefaultCacheBehavior:
+          AllowedMethods:
+          - DELETE
+          - GET
+          - HEAD
+          - OPTIONS
+          - PATCH
+          - POST
+          - PUT
+          TargetOriginId: theappS3Origin
+          ForwardedValues:
+            QueryString: 'false'
+            Cookies:
+              Forward: none
+          ViewerProtocolPolicy: redirect-to-https
+        DefaultRootObject: 'index.html'
+        CustomErrorResponses:
+          - ErrorCode: 403
+            ErrorCachingMinTTL: 0
+            ResponsePagePath: '/index.html'
+            ResponseCode: 200
+          - ErrorCode: 404
+            ErrorCachingMinTTL: 0
+            ResponsePagePath: '/index.html'
+            ResponseCode: 200
+        Enabled: 'true'
+        ViewerCertificate:
+          AcmCertificateArn: !Ref ApiSslCertificateParameter
+          SslSupportMethod: 'sni-only'
+          MinimumProtocolVersion: 'TLSv1.2_2018'
+
+  AppUiDnsRecord:
+    Type: 'AWS::Route53::RecordSet'
+    DependsOn:
+      - AppUiCloudFrontDistribution
+    Properties:
+      HostedZoneId: !Ref HostedZoneIdPublicParameter
+      Name: !Sub 'www.${PublicFqdnParameter}'
+      ResourceRecords:
+        - !GetAtt AppUiCloudFrontDistribution.DomainName
+      Type: CNAME
+      TTL: '300'
+
+  AppUiRootDnsRecord:
+    Type: 'AWS::Route53::RecordSet'
+    DependsOn:
+      - AppUiCloudFrontDistribution
+    Properties:
+      HostedZoneId: !Ref HostedZoneIdPublicParameter
+      Name: !Sub '${PublicFqdnParameter}'
+      Type: A
+      AliasTarget:
+        DNSName: !GetAtt AppUiCloudFrontDistribution.DomainName
+        HostedZoneId: 'Z2FDTNDATAQYW2'

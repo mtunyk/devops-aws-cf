@@ -1,0 +1,112 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: 'Setup of DB infrastructure for the app'
+
+Parameters:
+
+  AppNameParameter:
+    Type: String
+  VpcParameter:
+    Type: String
+  SubnetPrivateAIdParameter:
+    Type: String
+  SubnetPrivateBIdParameter:
+    Type: String
+  HostedZoneIdPrivateParameter:
+    Type: String
+  RdsInstanceTypeParameter:
+    Type: String
+  PrivateFqdnParameter:
+    Type: String
+  DBSnapshotARNParameter:
+    Type: String
+  DefaultSecurityGroupParameter:
+    Type: String
+
+Resources:
+
+  # RDS subnet group
+  RdsSubnetGroup:
+    Type: 'AWS::RDS::DBSubnetGroup'
+    Properties:
+      Tags:
+        - Key: 'Name'
+          Value: !Sub '${AppNameParameter}RdsSubnetGroup'
+      DBSubnetGroupDescription: '${AppNameParameter} RDS Subnet Group'
+      DBSubnetGroupName: !Sub '${AppNameParameter}-rds-subnet-group'
+      SubnetIds:
+        - !Ref SubnetPrivateAIdParameter
+        - !Ref SubnetPrivateBIdParameter
+
+  # RDS parameter group
+  RdsParameterGroup:
+    Type: 'AWS::RDS::DBParameterGroup'
+    Properties:
+      Tags:
+        - Key: 'Name'
+          Value: !Sub '${AppNameParameter}RdsParameterGroup'
+      Description: '${AppNameParameter} RDS Parameter Group'
+      Family: 'postgres11'
+
+  # RDS security group for App
+  RdsSecurityGroup:
+    Type: 'AWS::EC2::SecurityGroup'
+    Properties:
+      Tags:
+        - Key: 'Name'
+          Value: !Sub '${AppNameParameter}RdsSecurityGroup'
+      GroupDescription: "Ingress for Amazon RDS security group"
+      VpcId: !Ref VpcParameter
+      SecurityGroupIngress:
+        - SourceSecurityGroupId: !Ref DefaultSecurityGroupParameter
+          IpProtocol: 'tcp'
+          FromPort: 5432
+          ToPort: 5432
+
+  # RDS
+  AppDB:
+    Type: 'AWS::RDS::DBInstance'
+    DependsOn:
+      - RdsSubnetGroup
+      - RdsParameterGroup
+      - RdsSecurityGroup
+    DeletionPolicy: 'Snapshot'
+    Properties:
+      Tags:
+        - Key: 'Name'
+          Value: !Sub '${AppNameParameter}RDS'
+      AllocatedStorage: '20'
+      AutoMinorVersionUpgrade: true
+      AvailabilityZone: !Sub '${AWS::Region}a'
+      BackupRetentionPeriod: 10
+      DBInstanceClass: !Ref RdsInstanceTypeParameter
+      #DBInstanceIdentifier: !Sub '${AppNameParameter}DB'
+      DBParameterGroupName: !Ref RdsParameterGroup
+      VPCSecurityGroups:
+        - !Ref RdsSecurityGroup
+      #DBSnapshotIdentifier: !Ref DBSnapshotARNParameter
+      DBSubnetGroupName: !Ref RdsSubnetGroup
+      DeletionProtection: false
+      Engine: 'postgres'
+      EngineVersion: '11.6'
+      DBName: 'theapp'
+      MasterUsername: 'theapp'
+      MasterUserPassword: 'Passxxx1!'
+      MultiAZ: false
+      Port: '5432'
+      PreferredBackupWindow: '06:00-06:30'
+      PreferredMaintenanceWindow: 'Sat:07:00-Sat:07:30'
+      PubliclyAccessible: false
+      StorageEncrypted: false
+      StorageType: 'gp2'
+
+  AppDbDnsRecord:
+    Type: 'AWS::Route53::RecordSet'
+    DependsOn:
+      - AppDB
+    Properties:
+      HostedZoneId: !Ref HostedZoneIdPrivateParameter
+      Name: !Sub 'db.${PrivateFqdnParameter}'
+      ResourceRecords:
+        - !GetAtt AppDB.Endpoint.Address
+      Type: CNAME
+      TTL: '300'
